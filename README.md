@@ -75,3 +75,6 @@ Use this method if you prefer to run the database and node services directly on 
 5. Click **Start Outreach Campaign**.
 6. Check [http://localhost:8025](http://localhost:8025) in your browser to view all captured outbound emails.
 7. Scroll down to review the persistent database entry list under **Email History Log** on the application dashboard.
+
+
+**Video Reference**:https://drive.google.com/file/d/1dRr2HaGRetdzRvlQPwOQP3eK8Ni9YxGS/view?usp=sharing
