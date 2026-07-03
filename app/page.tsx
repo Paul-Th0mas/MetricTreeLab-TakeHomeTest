@@ -131,9 +131,27 @@ export default function OutreachDashboard() {
     }
   };
 
-  // Get all unique column names from the current influencers list to display as variables helper
+  // Get all unique placeholders from the body template (e.g. Name, Niche, Followers, Brand)
+  const templatePlaceholders = useMemo(() => {
+    const vars = new Set<string>();
+    const regex = /\{\{\s*([^}]+?)\s*\}\}/g;
+    let match;
+    while ((match = regex.exec(bodyTemplate)) !== null) {
+      if (match[1]) {
+        const trimmed = match[1].trim();
+        if (trimmed) {
+          vars.add(trimmed);
+        }
+      }
+    }
+    return Array.from(vars);
+  }, [bodyTemplate]);
+
+  // Combine columns from the current influencers list AND detected template placeholders
   const availableVariables = useMemo(() => {
     const vars = new Set<string>();
+    
+    // 1. Add all keys from the current influencers list
     influencers.forEach(row => {
       Object.keys(row).forEach(key => {
         if (key !== 'id') {
@@ -141,8 +159,14 @@ export default function OutreachDashboard() {
         }
       });
     });
+    
+    // 2. Add any placeholders detected in the body template
+    templatePlaceholders.forEach(p => {
+      vars.add(p);
+    });
+    
     return Array.from(vars);
-  }, [influencers]);
+  }, [influencers, templatePlaceholders]);
 
   // Paginated influencers calculation
   const totalInfluencerPages = Math.max(1, Math.ceil(influencers.length / influencersRowsPerPage));
@@ -158,13 +182,11 @@ export default function OutreachDashboard() {
   // Parse template with row data
   const compileTemplate = (template: string, row: InfluencerRow): string => {
     let result = template;
-    Object.keys(row).forEach(key => {
-      if (key !== 'id') {
-        const value = row[key] !== undefined && row[key] !== null ? String(row[key]) : '';
-        // Replace all instances of {{key}} case-insensitively
-        const regex = new RegExp(`\\{\\{\\s*${key}\\s*\\}\\}`, 'gi');
-        result = result.replace(regex, value);
-      }
+    availableVariables.forEach(key => {
+      const value = row[key] !== undefined && row[key] !== null ? String(row[key]) : '';
+      // Replace all instances of {{key}} case-insensitively
+      const regex = new RegExp(`\\{\\{\\s*${key}\\s*\\}\\}`, 'gi');
+      result = result.replace(regex, value);
     });
     return result;
   };
@@ -504,22 +526,26 @@ export default function OutreachDashboard() {
 
               {/* Variable Cheatsheet */}
               <div className="bg-slate-900/60 rounded-xl p-4 border border-slate-850 flex flex-col gap-2">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-violet-300">Available Placeholders</h3>
-                <p className="text-xs text-slate-400">Place double braces around any column header from your table to dynamic inject that value:</p>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-violet-300">Detected Placeholders</h3>
+                <p className="text-xs text-slate-400">These are parsed in real-time from your body template and automatically map to columns in the table below:</p>
                 <div className="flex flex-wrap gap-1.5 mt-1">
-                  {availableVariables.map((v) => (
-                    <span
-                      key={v}
-                      onClick={() => {
-                        // Append template block
-                        setBodyTemplate(prev => prev + ` {{${v}}}`);
-                      }}
-                      className="text-xs font-mono px-2.5 py-1 rounded bg-slate-800 border border-slate-700 hover:border-violet-500 text-slate-300 cursor-pointer select-none transition-all"
-                      title="Click to insert at end of body"
-                    >
-                      {`{{${v}}}`}
-                    </span>
-                  ))}
+                  {templatePlaceholders.length === 0 ? (
+                    <span className="text-xs text-slate-500 italic">No placeholders detected. Type something like {"{{Name}}"} or {"{{Discount}}"} in the body template to define one.</span>
+                  ) : (
+                    templatePlaceholders.map((v) => (
+                      <span
+                        key={v}
+                        onClick={() => {
+                          // Append template block
+                          setBodyTemplate(prev => prev + ` {{${v}}}`);
+                        }}
+                        className="text-xs font-mono px-2.5 py-1 rounded bg-slate-800 border border-slate-700 hover:border-violet-500 text-slate-300 cursor-pointer select-none transition-all"
+                        title="Click to insert at end of body"
+                      >
+                        {`{{${v}}}`}
+                      </span>
+                    ))
+                  )}
                 </div>
               </div>
             </div>

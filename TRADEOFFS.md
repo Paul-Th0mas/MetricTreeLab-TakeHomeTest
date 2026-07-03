@@ -1,59 +1,57 @@
-# Influencer Outreach Engine - Architecture, Trade-Offs, and Next Steps
+# Developer Notes: Decisions, Shortcuts, & Scaling Trade-offs
 
-This document outlines the architectural decisions, trade-offs, shortcuts, and future scaling strategies for the Influencer Outreach Engine MVP.
-
----
-
-## 1. Architectural Approach and Trade-Offs
-
-### Monolithic Architecture
-A monolithic structure (Next.js App Router with Server Actions) was selected for this project. 
-- **Rationale**: For an MVP focused on core functionalities (sending emails, configuring templates, and reviewing database logs), a monolith minimizes infrastructure overhead, simplifies state management, and enables rapid end-to-end development.
-- **Trade-Off**: Scaling individual components (such as the email-sending worker) independently is not possible without refactoring to a microservices or queue-based design.
-
-### SMTP Sandboxing via Mailpit
-Instead of integrating a live Gmail/Google OAuth connection, a sandboxed SMTP server (Mailpit) was used for email delivery.
-- **Rationale**: Real-world Google integration requires OAuth consent screen verification, domain configuration, and credentials management, introducing significant setup friction for external reviewers. Using Mailpit allows reviewers to test the entire sending and logging lifecycle locally with zero-friction configuration.
-- **Trade-Off**: Real email delivery is simulated rather than performed. Real-world delivery requires managing SPF, DKIM, DMARC records, and credential authorization.
+This sheet covers the reality of how the outreach engine is built, where I took shortcuts to get this MVP out the door, and what will break first when we start scaling.
 
 ---
 
-## 2. Shortcuts Taken
+## Why I Built It This Way
 
-- **Direct Database Writes in Server Actions**: The application writes log entries to PostgreSQL directly from Next.js Server Actions during the request-response lifecycle. In a production system, these should be handled asynchronously via a background task queue to prevent blocking client requests and avoid exhausting database connection pools.
-- **Client-Side Templating and State**: Template compilation is executed client-side before sending data to the server. While sufficient for small batches, this should ideally be moved server-side to maintain data integrity and reduce payload size.
+### Monolithic Next.js + Server Actions
+I went with a single monolithic Next.js repository using Server Actions (`app/actions/outreach.ts`) to handle the backend work. 
+- **The Good:** For an MVP, keeping everything in one place makes it super fast to build and reason about. State sharing is simple, deployment is a one-click affair, and I didn't have to manage separate service repositories for sending and logging.
+- **The Bad:** We can't scale the email sender independently. If the frontend gets quiet but the sending worker is slammed, they still share the same server resources.
 
----
-
-## 3. What Would Break First at Scale
-At a load of **10,000 influencers and 100 brands**, the system would encounter several immediate bottlenecks:
-
-### Network and Serverless Execution Timeouts
-- **Sequential Mode**: With a 500ms delay per email, sending 10,000 emails would take over 83 minutes. This would immediately violate the execution limits of serverless platforms (e.g., Vercel's 10-second to 60-second timeouts for serverless functions).
-- **Burst Mode**: Sending 10,000 requests concurrently would exhaust network sockets, hit SMTP rate limits, and crash the Node.js runtime due to memory exhaustion.
-
-### Database Connection Exhaustion
-Under a high volume of concurrent sends, 10,000 write operations executed directly from Server Actions would instantly exhaust the PostgreSQL database connection pool, leading to connection timeouts and query failures.
-
-### Frontend DOM Rendering Limits
-Rendering 10,000 table rows without virtualization (e.g., react-window) causes significant browser main-thread lag, resulting in an unresponsive UI.
+### Mailpit Sandbox instead of Real SMTP
+Rather than dealing with Google OAuth consent screens, domain validation, and SMTP credential setup right away, I set up Mailpit as a local mock SMTP receiver.
+- **The Good:** Reviewers can test the whole sending and logging cycle locally with zero-friction configuration. Just point Nodemailer to `localhost:1025` and inspect the emails at port `8025`.
+- **The Bad:** It's a simulated environment. Moving to production requires a proper production mail service and dealing with SPF, DKIM, and email reputations.
 
 ---
 
-## 4. Next Steps for a Production-Grade Product
+## Shortcuts Taken (To Ship Quickly)
 
-If this were developed into a commercial product, the following systems would be implemented:
+- **Writing directly to PostgreSQL in Server Actions**: Every time we send an email in `sendOutreachEmail` (`lib/mailer.ts`), we immediately await `prisma.emailLog.create()`. Doing database writes synchronously in the request path is fine for a few rows, but in production, this blocks the execution thread and will quickly exhaust the connection pool under load.
+- **Compiling templates on the client-side**: Right now, the page compiles template placeholders (like `{{Name}}` and `{{Brand}}`) directly in React before invoking the server action. For small lists, this is fine, but formatting and compiling should really happen server-side to prevent payload bloating and ensure data integrity.
+- **Docker/Docker Compose instead of Vercel**: I packaged everything into Docker container setups (`docker-compose.yml`) rather than deploying directly to Vercel and a cloud database provider. While Next.js is usually hosted on Vercel, deploying there requires configuring complex remote environments, databases, and OAuth/SMTP integrations. Using Docker makes it dead simple for anyone to spin up the entire environment (Next.js web app, local PostgreSQL database, and Mailpit SMTP server) in one command (`docker compose up`) and immediately start testing.
 
-### Asynchronous Queue System
-Decouple email sending from the HTTP request-response cycle. Utilizing a queue system (such as BullMQ with Redis, or AWS SQS):
-- Prevents timeout issues by processing sending operations in the background.
-- Ensures resilience: if a worker crashes or restarts, the queue retains the state and resumes from the last successfully sent index.
-- Enables throttling to strictly adhere to SMTP provider rate limits.
+---
 
-### Production Email Service
-Transition from the local mock SMTP server to **AWS Simple Email Service (SES)**:
-- Provides high deliverability, dedicated IP options, and built-in handling for bounces, complaints, and spam reports.
-- Integrates with domain validation protocols (SPF, DKIM) to maintain brand email reputation.
+## What Will Blow Up First at Scale?
 
-### Database Optimization
-Implement connection pooling (using tools like PgBouncer or serverless-friendly connection managers like Prisma Accelerate) and optimize indexing on query filters to manage high concurrent read and write connections.
+If we try to run this with **10,000 influencers and 100 brands**, we will run into three immediate walls:
+
+### 1. Serverless Timeout Limits
+* **Sequential Mode**: We wait 500ms between each email to be polite. Sending 10,000 emails sequentially would take about 1.4 hours. A serverless function (like Vercel or Netlify) will hard-timeout after 10 to 60 seconds, killing the process mid-run.
+* **Burst Mode**: If we trigger 10,000 emails concurrently (`Promise.all`), we will immediately exhaust server memory, run out of open sockets, and likely get throttled/blocked by our SMTP provider.
+
+### 2. Database Connection Pool Exhaustion
+Every server action run spins up database connection queries. Under heavy concurrency (e.g. Burst Mode), 10,000 simultaneous writes will exceed the database's max connection limits, throwing immediate connection timeout errors.
+
+### 3. Frontend Rendering Lag
+The influencer table doesn't use virtualization (like `react-window` or `react-virtualized`). Trying to render 10,000 rows in the DOM at once will freeze the browser's main thread and make the page completely unresponsive.
+
+---
+
+## What I'd Do Next for Production
+
+If this becomes a commercial tool, here's what needs to be implemented:
+
+1. **An Asynchronous Queue (BullMQ / SQS)**
+   We need to move email sending out of the HTTP request lifecycle entirely. A user clicks "Send", we push a job to a queue (like Redis-backed BullMQ), and return a fast `202 Accepted` response. Background workers pick up the jobs, handle retries if SMTP fails, and respect provider rate limits (throttling).
+   
+2. **AWS SES (or similar production service)**
+   Swap the local Mailpit config for a real provider like AWS SES. This handles SPF/DKIM verification, spam reputation, and hooks up webhooks to process bounces and complaints.
+
+3. **Connection Pooling & Virtualization**
+   Add PgBouncer or use Prisma Accelerate to handle database connections safely under heavy write loads, and use virtual lists to render only the visible table rows in the UI.
+
