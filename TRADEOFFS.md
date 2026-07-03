@@ -22,7 +22,7 @@ Rather than dealing with Google OAuth consent screens, domain validation, and SM
 
 - **Writing directly to PostgreSQL in Server Actions**: Every time we send an email in `sendOutreachEmail` (`lib/mailer.ts`), we immediately await `prisma.emailLog.create()`. Doing database writes synchronously in the request path is fine for a few rows, but in production, this blocks the execution thread and will quickly exhaust the connection pool under load.
 - **Compiling templates on the client-side**: Right now, the page compiles template placeholders (like `{{Name}}` and `{{Brand}}`) directly in React before invoking the server action. For small lists, this is fine, but formatting and compiling should really happen server-side to prevent payload bloating and ensure data integrity.
-- **Docker/Docker Compose instead of Vercel**: I packaged everything into Docker container setups (`docker-compose.yml`) rather than deploying directly to Vercel and a cloud database provider. While Next.js is usually hosted on Vercel, deploying there requires configuring complex remote environments, databases, and OAuth/SMTP integrations. Using Docker makes it dead simple for anyone to spin up the entire environment (Next.js web app, local PostgreSQL database, and Mailpit SMTP server) in one command (`docker compose up`) and immediately start testing.
+- **Single-Host Docker Compose Topology**: We packaged the Next.js web application, PostgreSQL database, and Mailpit SMTP server into a single `docker-compose.yml` stack. While this is ideal for zero-friction local setups and single-host VPS deployments, a production-grade container architecture would decouple these services—using managed databases, dedicated container tasks (e.g., ECS/Kubernetes), and isolated worker processes.
 
 ---
 
@@ -30,8 +30,8 @@ Rather than dealing with Google OAuth consent screens, domain validation, and SM
 
 If we try to run this with **10,000 influencers and 100 brands**, we will run into three immediate walls:
 
-### 1. Serverless Timeout Limits
-* **Sequential Mode**: We wait 500ms between each email to be polite. Sending 10,000 emails sequentially would take about 1.4 hours. A serverless function (like Vercel or Netlify) will hard-timeout after 10 to 60 seconds, killing the process mid-run.
+### 1. HTTP & Gateway Connection Timeouts
+* **Sequential Mode**: We wait 500ms between each email to be polite. Sending 10,000 emails sequentially would take about 1.4 hours. Standard web browsers, reverse proxies (like Nginx), and Node.js servers will hard-timeout long-running HTTP requests (often after 30 to 120 seconds), terminating the Server Action process mid-run.
 * **Burst Mode**: If we trigger 10,000 emails concurrently (`Promise.all`), we will immediately exhaust server memory, run out of open sockets, and likely get throttled/blocked by our SMTP provider.
 
 ### 2. Database Connection Pool Exhaustion
@@ -54,4 +54,7 @@ If this becomes a commercial tool, here's what needs to be implemented:
 
 3. **Connection Pooling & Virtualization**
    Add PgBouncer or use Prisma Accelerate to handle database connections safely under heavy write loads, and use virtual lists to render only the visible table rows in the UI.
+
+4. **Campaign Completion Notifications**
+   Since large campaigns run asynchronously in the background, send a summary notification email to the user when the entire outreach run is complete, outlining key metrics (delivered count, failures, and bounces).
 
